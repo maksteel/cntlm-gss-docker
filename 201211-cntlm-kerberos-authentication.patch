@@ -1,0 +1,757 @@
+Index: debian/control
+===================================================================
+--- debian/control	(revision 282)
++++ debian/control	(working copy)
+@@ -2,7 +2,7 @@
+ Section: net
+ Priority: optional
+ Maintainer: David Watson <dwatson@debian.org>
+-Build-Depends: debhelper (>= 5)
++Build-Depends: debhelper (>= 5), krb5-multidev
+ Standards-Version: 3.8.0
+ Vcs-Git: git://planetwatson.co.uk/cntlm
+ Vcs-Browser: http://projects.planetwatson.co.uk/repositories/show/cntlm
+@@ -10,7 +10,7 @@
+ 
+ Package: cntlm
+ Architecture: any
+-Depends: adduser, ${misc:Depends}, ${shlibs:Depends}
++Depends: adduser, libgssapi-krb5-2, ${misc:Depends}, ${shlibs:Depends}
+ Replaces: ntlmaps
+ Description: Fast NTLM authentication proxy with tunneling
+  Cntlm is a fast and efficient NTLM proxy, with support for TCP/IP tunneling,
+Index: auth.h
+===================================================================
+--- auth.h	(revision 282)
++++ auth.h	(working copy)
+@@ -41,6 +41,9 @@
+ 	int hashntlm2;
+ 	int hashnt;
+ 	int hashlm;
++#ifdef ENABLE_KERBEROS	
++	int haskrb;
++#endif
+ 	uint32_t flags;
+ };
+ 
+Index: configure
+===================================================================
+--- configure	(revision 282)
++++ configure	(working copy)
+@@ -77,3 +77,17 @@
+ 	echo $rc >> $CONFIG
+ 	echo $RET
+ done
++
++while [ $1 ]
++do
++	case $1 in
++		--enable-kerberos)
++			printf "#define ENABLE_KERBEROS" >> $CONFIG
++			;;
++		*)
++			echo "Unknown flag $1"
++			rm -f $CONFIG
++			;;
++	esac
++	shift
++done
+\ No newline at end of file
+Index: kerberos.h
+===================================================================
+--- kerberos.h	(revision 0)
++++ kerberos.h	(revision 0)
+@@ -0,0 +1,55 @@
++/*
++ * CNTLM is free software; you can redistribute it and/or modify it under the
++ * terms of the GNU General Public License as published by the Free Software
++ * Foundation; either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * CNTLM is distributed in the hope that it will be useful, but WITHOUT ANY
++ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
++ * St, Fifth Floor, Boston, MA 02110-1301, USA.
++ *
++ * Copyright (c) 2007 David Kubicek
++ *
++ */
++
++/*
++ * kerberos.h
++ *
++ *  Created on: 25/ago/2010
++ *      Author: luca
++ */
++
++#ifndef KERBEROS_H_
++#define KERBEROS_H_
++
++#include "globals.h"
++#include "auth.h"
++
++//used in global auth flag
++#define KRB_NO_CREDS				0
++#define KRB_CREDENTIAL_AVAILABLE	1
++#define KRB_FORCE_USE_KRB			2
++
++//used while auth
++#define KRB_NOT_TRIED 	0
++#define KRB_OK 			1
++#define KRB_KO 			4
++
++/**
++ * acquires a kerberos token for default credential using SPN HTTP@<thost>
++ */
++int acquire_kerberos_token(proxy_t* proxy, struct auth_s *credentials, char* buf);
++
++/**
++ * checks if a default cached credential is cached
++ */
++int check_credential();
++
++int acquire_credential(struct auth_s *credentials);
++
++#endif /* KERBEROS_H_ */
+Index: auth.c
+===================================================================
+--- auth.c	(revision 282)
++++ auth.c	(working copy)
+@@ -52,6 +52,9 @@
+ 	dst->hashnt = src->hashnt;
+ 	dst->hashlm = src->hashlm;
+ 	dst->flags = src->flags;
++#ifdef ENABLE_KERBEROS
++	dst->haskrb = src->haskrb;
++#endif
+ 
+ 	strlcpy(dst->domain, src->domain, MINIBUF_SIZE);
+ 	strlcpy(dst->workstation, src->workstation, MINIBUF_SIZE);
+Index: Makefile
+===================================================================
+--- Makefile	(revision 282)
++++ Makefile	(working copy)
+@@ -21,6 +21,16 @@
+ OSLDFLAGS=$(shell [ $(OS) = "SunOS" ] && echo "-lrt -lsocket -lnsl")
+ LDFLAGS:=-lpthread $(OSLDFLAGS)
+ 
++ENABLE_KERBEROS=$(shell grep -c ENABLE_KERBEROS config/config.h)
++ifeq ($(ENABLE_KERBEROS),1)
++	OBJS+=kerberos.o
++	LDFLAGS+=-lgssapi_krb5
++endif
++
++#CFLAGS+=-g
++
++all: $(NAME)
++
+
+ $(NAME): configure-stamp $(OBJS)
+ 	@echo "Linking $@"
+ 	@$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
+Index: main.c
+===================================================================
+--- main.c	(revision 282)
++++ main.c	(working copy)
+@@ -60,6 +60,10 @@
+ #include "forward.h"				/* code serving via parent proxy */
+ #include "direct.h"				/* code serving directly without proxy */
+ 
++#ifdef ENABLE_KERBEROS
++#include "kerberos.h"
++#endif
++
+ #define STACK_SIZE	sizeof(void *)*8*1024
+ 
+ /*
+@@ -883,6 +887,9 @@
+ 				"\t    ACL allow rule. IP or hostname, net must be a number (CIDR notation)\n");
+ 		fprintf(stderr, "\t-a  ntlm | nt | lm\n"
+ 				"\t    Authentication type - combined NTLM, just LM, or just NT. Default NTLM.\n"
++#ifdef ENABLE_KERBEROS
++				"\t    GSS activates kerberos auth: you need a cached credential.\n"
++#endif
+ 				"\t    It is the most versatile setting and likely to work for you.\n");
+ 		fprintf(stderr, "\t-B  Enable NTLM-to-basic authentication.\n");
+ 		fprintf(stderr, "\t-c  <config_file>\n"
+@@ -1176,6 +1183,14 @@
+ 			g_creds->hashnt = 2;
+ 			g_creds->hashlm = 0;
+ 			g_creds->hashntlm2 = 0;
++#ifdef ENABLE_KERBEROS			
++		} else if (!strcasecmp("gss", cauth)) {
++			g_creds->haskrb = KRB_FORCE_USE_KRB;
++			g_creds->hashnt = 0;
++			g_creds->hashlm = 0;
++			g_creds->hashntlm2 = 0;
++			syslog(LOG_INFO, "Forcing GSS auth.\n");
++#endif				
+ 		} else {
+ 			syslog(LOG_ERR, "Unknown NTLM auth combination.\n");
+ 			myexit(1);
+@@ -1262,6 +1277,12 @@
+ 		memset(cpassword, 0, strlen(cpassword));
+ 	}
+ 
++#ifdef ENABLE_KERBEROS
++	g_creds->haskrb |= check_credential();
++	if(g_creds->haskrb & KRB_CREDENTIAL_AVAILABLE)
++		syslog(LOG_INFO, "Using cached credential for GSS auth.\n");
++#endif
++
+ 	auth_strcpy(g_creds, user, cuser);
+ 	auth_strcpy(g_creds, domain, cdomain);
+ 	auth_strcpy(g_creds, workstation, cworkstation);
+@@ -1309,8 +1330,11 @@
+ 	/*
+ 	 * If we're going to need a password, check we really have it.
+ 	 */
+-	if (!ntlmbasic && (
+-			(g_creds->hashnt && !g_creds->passnt)
++	if (!ntlmbasic &&
++#ifdef ENABLE_KERBEROS
++			!g_creds->haskrb &&
++#endif
++			((g_creds->hashnt && !g_creds->passnt)
+ 		     || (g_creds->hashlm && !g_creds->passlm)
+ 		     || (g_creds->hashntlm2 && !g_creds->passntlm2))) {
+ 		syslog(LOG_ERR, "Parent proxy account password (or required hashes) missing.\n");
+Index: forward.c
+===================================================================
+--- forward.c	(revision 282)
++++ forward.c	(working copy)
+@@ -38,6 +38,10 @@
+ #include "scanner.h"
+ #include "pages.h"
+ 
++#ifdef ENABLE_KERBEROS
++#include "kerberos.h"
++#endif
++
+ int parent_curr = 0;
+ pthread_mutex_t parent_mtx = PTHREAD_MUTEX_INITIALIZER;
+ 
+@@ -49,6 +53,11 @@
+  *
+  * Writes required credentials into passed auth_s structure
+  */
++
++#ifdef ENABLE_KERBEROS
++proxy_t *curr_proxy;
++#endif
++
+ int proxy_connect(struct auth_s *credentials) {
+ 	proxy_t *aux;
+ 	int i, prev;
+@@ -89,6 +98,12 @@
+ 			aux = (proxy_t *)plist_get(parent_list, ++parent_curr);
+ 			pthread_mutex_unlock(&parent_mtx);
+ 			syslog(LOG_ERR, "Proxy connect failed, will try %s:%d\n", aux->hostname, aux->port);
++
++#ifdef ENABLE_KERBEROS
++		} else {
++			//kerberos needs the hostname of the parent proxy for generate the token, so we keep it
++			curr_proxy = aux;
++#endif
+ 		}
+ 	} while (i <= 0 && ++loop < parent_count);
+ 
+@@ -139,13 +154,28 @@
+ 	int rc = 0;
+ 
+ 	buf = new(BUFSIZE);
++	
++#ifdef ENABLE_KERBEROS
++	if(g_creds->haskrb && acquire_kerberos_token(curr_proxy, credentials, buf)) {
++		//pre auth, we try to authenticate directly with kerberos, without to ask if auth is needed
++		//we assume that if kdc releases a ticket for the proxy, then the proxy is configured for kerberos auth
++		//drawback is that later in the code cntlm logs that no auth is required because we have already authenticated
++		if (debug)
++			printf("Using Negotiation ...\n");
++	}
++	else {
++#endif
+ 
+-	strcpy(buf, "NTLM ");
+-	len = ntlm_request(&tmp, credentials);
+-	if (len) {
+-		to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
+-		free(tmp);
++		strcpy(buf, "NTLM ");
++		len = ntlm_request(&tmp, credentials);
++		if (len) {
++			to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
++			free(tmp);
++		}
++
++#ifdef ENABLE_KERBEROS		
+ 	}
++#endif
+ 
+ 	auth = dup_rr_data(request);
+ 	auth->headers = hlist_mod(auth->headers, "Proxy-Authorization", buf, 1);
+@@ -224,30 +254,44 @@
+ 			goto bailout;
+ 		}
+ 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
++
+ 		if (tmp) {
+-			challenge = new(strlen(tmp) + 5 + 1);
+-			len = from_base64(challenge, tmp + 5);
+-			if (len > NTLM_CHALLENGE_MIN) {
+-				len = ntlm_response(&tmp, challenge, len, credentials);
+-				if (len > 0) {
+-					strcpy(buf, "NTLM ");
+-					to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
+-					request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
+-					free(tmp);
++#ifdef ENABLE_KERBEROS		
++			if(g_creds->haskrb && strncasecmp(tmp, "NEGOTIATE", 9) == 0 && acquire_kerberos_token(curr_proxy, credentials, buf)) {
++				if (debug)
++					printf("Using Negotiation ...\n");
++
++				request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
++				free(tmp);
++			}
++			else {
++#endif			
++				challenge = new(strlen(tmp) + 5 + 1);
++				len = from_base64(challenge, tmp + 5);
++				if (len > NTLM_CHALLENGE_MIN) {
++					len = ntlm_response(&tmp, challenge, len, credentials);
++					if (len > 0) {
++						strcpy(buf, "NTLM ");
++						to_base64(MEM(buf, uint8_t, 5), MEM(tmp, uint8_t, 0), len, BUFSIZE-5);
++						request->headers = hlist_mod(request->headers, "Proxy-Authorization", buf, 1);
++						free(tmp);
++					} else {
++						syslog(LOG_ERR, "No target info block. Cannot do NTLMv2!\n");
++						free(challenge);
++						goto bailout;
++					}
+ 				} else {
+-					syslog(LOG_ERR, "No target info block. Cannot do NTLMv2!\n");
++					syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
+ 					free(challenge);
+ 					goto bailout;
+ 				}
+-			} else {
+-				syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
++
+ 				free(challenge);
+-				goto bailout;
++#ifdef ENABLE_KERBEROS				
+ 			}
+-
+-			free(challenge);
++#endif			
+ 		} else {
+-			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM not supported?\n");
++			syslog(LOG_WARNING, "No Proxy-Authenticate, NTLM/Negotiate not supported?\n");
+ 		}
+ 	} else if (pretend407) {
+ 		if (debug)
+Index: doc/cntlm.1
+===================================================================
+--- doc/cntlm.1	(revision 282)
++++ doc/cntlm.1	(working copy)
+@@ -87,7 +87,7 @@
+ the \fIIP\fP part has more bits than you declare by \fImask\fP (e.g. 10.20.30.40/24 should be 10.20.30.0/24).
+ 
+ .TP 
+-.B -a NTLMv2 | NTLM2SR | NT | NTLM | LM\ \ \ \ (Auth)
++.B -a NTLMv2 | NTLM2SR | NT | NTLM | LM | GSS\ \ \ \ (Auth)
+ Authentication type. NTLM(v2) comprises of one or two hashed responses, NT and LM or NTLM2SR or NTv2 and LMv2,
+ which are computed from the password hash. Each response uses a different hashing algorithm; as new response
+ types were invented, stronger algorithms were used. When you first install \fBcntlm\fP, find the strongest one
+@@ -100,6 +100,15 @@
+ NT\ 4.0\ SP4. That's for \fBa very long time\fP! I strongly suggest you use it to protect your credentials
+ on-line. You should also replace plaintext \fBPassword\fP options with hashed \fBPass[NTLMv2|NT|LM]\fP
+ equivalents. NTLMv2 is the most and possibly the only secure authentication of the NTLM family.
++.br
++\fBGSS:\fP GSS option activates the kerberos authentication. You need a cached credential (see kinit doc): per default
++the cache file is in /tmp/krb5cc_<uid>, you can override this using the environment variable KRB5CCNAME.
++In example KRB5CCNAME=FILE:/tmp/my_krb5cc_for_LDS.IT
++If GSS is specified, at each connection sends the auth token without to ask the proxy if auth is needed.
++If GSS credentials are not available will fallback to the NTLM discovery procedure
++If no Auth type is specified and there is a GSS cached credential available and the server asks for a 
++'Negotiate' auth, then a GSS token is used, else the NTLM auth is used
++
+ 
+ .ne 4
+ .TP
+Index: kerberos.c
+===================================================================
+--- kerberos.c	(revision 0)
++++ kerberos.c	(revision 0)
+@@ -0,0 +1,366 @@
++/*
++ * CNTLM is free software; you can redistribute it and/or modify it under the
++ * terms of the GNU General Public License as published by the Free Software
++ * Foundation; either version 2 of the License, or (at your option) any later
++ * version.
++ *
++ * CNTLM is distributed in the hope that it will be useful, but WITHOUT ANY
++ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
++ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
++ * St, Fifth Floor, Boston, MA 02110-1301, USA.
++ *
++ * Copyright (c) 2007 David Kubicek
++ *
++ */
++
++//http://docs.oracle.com/cd/E18752_01/html/816-4863/sampleprogs-1.html
++/*
++ * Copyright 1994 by OpenVision Technologies, Inc.
++ *
++ * Permission to use, copy, modify, distribute, and sell this software
++ * and its documentation for any purpose is hereby granted without fee,
++ * provided that the above copyright notice appears in all copies and
++ * that both that copyright notice and this permission notice appear in
++ * supporting documentation, and that the name of OpenVision not be used
++ * in advertising or publicity pertaining to distribution of the software
++ * without specific, written prior permission. OpenVision makes no
++ * representations about the suitability of this software for any
++ * purpose.  It is provided "as is" without express or implied warranty.
++ *
++ * OPENVISION DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
++ * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
++ * EVENT SHALL OPENVISION BE LIABLE FOR ANY SPECIAL, INDIRECT OR
++ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF
++ * USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
++ * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
++ * PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include "globals.h"
++#include "auth.h"
++#include "kerberos.h"
++
++#include <string.h>
++#include <stdio.h>
++#include <syslog.h>
++#include <gssapi/gssapi.h>
++#include <stdlib.h>
++
++/*
++ * Function: display_ctx_flags
++ *
++ * Purpose: displays the flags returned by context initiation in
++ *          a human-readable form
++ *
++ * Arguments:
++ *
++ *      int             ret_flags
++ *
++ * Effects:
++ *
++ * Strings corresponding to the context flags are printed on
++ * stdout, preceded by "context flag: " and followed by a newline
++ */
++
++void display_ctx_flags(OM_uint32 flags) {
++	if (flags & GSS_C_DELEG_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_DELEG_FLAG\n");
++	if (flags & GSS_C_MUTUAL_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_MUTUAL_FLAG\n");
++	if (flags & GSS_C_REPLAY_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_REPLAY_FLAG\n");
++	if (flags & GSS_C_SEQUENCE_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_SEQUENCE_FLAG\n");
++	if (flags & GSS_C_CONF_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_CONF_FLAG\n");
++	if (flags & GSS_C_INTEG_FLAG)
++		syslog(LOG_INFO, "context flag: GSS_C_INTEG_FLAG\n");
++}
++
++static void display_status_1(char *m, OM_uint32 code, int type) {
++	OM_uint32 maj_stat, min_stat;
++	gss_buffer_desc msg;
++	OM_uint32 msg_ctx;
++
++	msg_ctx = 0;
++	while (1) {
++		maj_stat = gss_display_status(&min_stat, code, type, GSS_C_NULL_OID,
++				&msg_ctx, &msg);
++		if (1)
++			syslog(LOG_ERR, "GSS-API error %s: %s\n", m, (char *) msg.value);
++		(void) gss_release_buffer(&min_stat, &msg);
++
++		if (!msg_ctx)
++			break;
++	}
++}
++
++/*
++ * Function: display_status
++ *
++ * Purpose: displays GSS-API messages
++ *
++ * Arguments:
++ *
++ *      msg             a string to be displayed with the message
++ *      maj_stat        the GSS-API major status code
++ *      min_stat        the GSS-API minor status code
++ *
++ * Effects:
++ *
++ * The GSS-API messages associated with maj_stat and min_stat are
++ * displayed on stderr, each preceded by "GSS-API error <msg>: " and
++ * followed by a newline.
++ */
++void display_status(char *msg, OM_uint32 maj_stat, OM_uint32 min_stat) {
++	display_status_1(msg, maj_stat, GSS_C_GSS_CODE);
++	if (maj_stat != GSS_S_COMPLETE)
++		display_status_1(msg, min_stat, GSS_C_MECH_CODE);
++}
++
++void display_name(char* txt, gss_name_t *name) {
++	gss_OID mechOid = GSS_C_NO_OID;
++	OM_uint32 maj_stat;
++	OM_uint32 min_stat;
++	gss_buffer_desc out_name;
++
++//	maj_stat = gss_display_name(&min_stat, *name, &out_name, &mechOid);
++	maj_stat = gss_display_name(&min_stat, *name, &out_name, NULL);
++	if (maj_stat != GSS_S_COMPLETE) {
++		display_status("Display name", maj_stat, min_stat);
++	}
++
++	syslog(LOG_INFO, txt, (char *) out_name.value);
++
++	(void) gss_release_buffer(&min_stat, &out_name);
++
++	if (mechOid != GSS_C_NO_OID)
++		(void) gss_release_oid(&min_stat, &mechOid);
++}
++
++int acquire_name(gss_name_t *target_name, char *service_name, gss_OID oid) {
++	gss_buffer_desc tmp_tok;
++	OM_uint32 maj_stat, min_stat;
++
++	tmp_tok.value = service_name;
++	tmp_tok.length = strlen(service_name) + 1;
++
++	maj_stat = gss_import_name(&min_stat, &tmp_tok, oid, target_name);
++
++	if (maj_stat != GSS_S_COMPLETE) {
++		display_status("Parsing name", maj_stat, min_stat);
++	} else if (debug){
++		display_name("Acquired kerberos name %s\n", target_name);
++	}
++	return maj_stat;
++}
++
++/*
++ * Function: client_establish_context
++ *
++ * Purpose: establishes a GSS-API context with a specified service and
++ * returns the context handle
++ *
++ * Arguments:
++ *
++ *      service_name    (r) the ASCII service name of the service
++ *      context         (w) the established GSS-API context
++ *      ret_flags       (w) the returned flags from init_sec_context
++ *
++ * Returns: 0 on success, -1 on failure
++ *
++ * Effects:
++ *
++ * service_name is imported as a GSS-API name and a GSS-API context is
++ * established with the corresponding service; the service should be
++ * listening on the TCP connection s.  The default GSS-API mechanism
++ * is used, and mutual authentication and replay detection are
++ * requested.
++ *
++ * If successful, the context handle is returned in context.  If
++ * unsuccessful, the GSS-API error messages are displayed on stderr
++ * and -1 is returned.
++ */
++int client_establish_context(char *service_name,
++		OM_uint32 *ret_flags, gss_buffer_desc* send_tok) {
++	gss_name_t target_name;
++	gss_ctx_id_t gss_context = GSS_C_NO_CONTEXT;
++	OM_uint32 maj_stat, min_stat, init_min_stat;
++
++	if ((maj_stat = acquire_name(&target_name, service_name,
++			GSS_C_NT_HOSTBASED_SERVICE)) != GSS_S_COMPLETE)
++		return maj_stat;
++
++	if (debug)
++		display_name("SPN name %s\n", &target_name);
++
++	maj_stat = gss_init_sec_context(&init_min_stat, GSS_C_NO_CREDENTIAL,
++			&gss_context,
++			target_name,
++			GSS_C_NULL_OID,// use default mech
++			0, 0, // no special flags requested, no time req
++			GSS_C_NO_CHANNEL_BINDINGS, /* no channel bindings */
++			GSS_C_NO_BUFFER, // no input buffer
++			NULL, /* ignore mech type */
++			send_tok, ret_flags, //the returned token, the token flags
++			NULL /* ignore time_rec */
++			);
++
++	gss_release_name(&min_stat, &target_name);
++
++	if (maj_stat != GSS_S_COMPLETE) {
++		if(maj_stat == GSS_S_CONTINUE_NEEDED){
++			//TODO
++		}
++		display_status("Initializing context", maj_stat, init_min_stat);
++
++		if (gss_context == GSS_C_NO_CONTEXT)
++			gss_delete_sec_context(&min_stat, &gss_context, GSS_C_NO_BUFFER);
++		return maj_stat;
++	}
++
++	if (debug)
++		syslog(LOG_INFO, "Got token (size=%d)\n", (int) send_tok->length);
++
++	maj_stat = gss_delete_sec_context(&min_stat, &gss_context, GSS_C_NO_BUFFER);
++	if (maj_stat != GSS_S_COMPLETE) {
++		display_status("Deleting context", maj_stat, min_stat);
++	}
++	return GSS_S_COMPLETE;//maj_stat;
++}
++
++
++
++/**
++ * acquires a kerberos token for default credential using SPN HTTP@<thost>
++ */
++int acquire_kerberos_token(proxy_t* proxy, struct auth_s *credentials,
++		char* buf) {
++	char service_name[BUFSIZE], token[BUFSIZE];
++	OM_uint32 ret_flags, min_stat;
++
++	if (credentials->haskrb == KRB_KO) {
++		if (debug)
++			syslog(LOG_INFO, "Skipping already failed gss auth for %s\n",
++					proxy->hostname);
++		return 0;
++	}
++
++	if (!(credentials->haskrb & KRB_CREDENTIAL_AVAILABLE)) {
++		//try to get credential
++//		if(acquire_credential(credentials)){
++			credentials->haskrb |= check_credential();
++			if (!(credentials->haskrb & KRB_CREDENTIAL_AVAILABLE)){
++				//no credential -> no token
++				if (debug)
++					syslog(LOG_INFO, "No valid credential available\n");
++				return 0;
++			}
++//		}
++	}
++
++	gss_buffer_desc send_tok;
++
++	strcpy(service_name, "HTTP@");
++	strcat(service_name, proxy->hostname);
++
++	int rc = client_establish_context(service_name, &ret_flags, &send_tok);
++
++	if (rc == GSS_S_COMPLETE) {
++		credentials->haskrb = KRB_OK;
++
++		to_base64((unsigned char *) token, send_tok.value, send_tok.length,
++				BUFSIZE);
++
++		if (debug) {
++			syslog(LOG_INFO, "Token B64 (size=%d)... %s\n",
++					(int) strlen(token), token);
++			display_ctx_flags(ret_flags);
++		}
++
++		strcpy(buf, "NEGOTIATE ");
++		strcat(buf, token);
++
++		rc=1;
++	} else {
++		credentials->haskrb = KRB_KO;
++
++		if (debug)
++			syslog(LOG_INFO, "No valid token acquired for %s\n", service_name);
++
++		rc=0;
++	}
++
++	(void) gss_release_buffer(&min_stat, &send_tok);
++
++	return rc;
++}
++
++/**
++ * checks if a default cached credential is cached
++ */
++int check_credential() {
++	OM_uint32 min_stat;
++	gss_name_t name;
++	OM_uint32 lifetime;
++	gss_cred_usage_t cred_usage;
++	gss_OID_set mechanisms;
++	OM_uint32 maj_stat;
++
++	maj_stat = gss_inquire_cred(&min_stat, GSS_C_NO_CREDENTIAL, &name,
++			&lifetime, &cred_usage, &mechanisms);
++	if (maj_stat != GSS_S_COMPLETE) {
++		display_status("Inquire credential", maj_stat, min_stat);
++		return 0;
++	}
++	(void) gss_release_oid_set(&min_stat, &mechanisms);
++
++	if (name != NULL) {
++		display_name("Available cached credential %s\n", &name);
++		(void) gss_release_name(&min_stat, &name);
++		return KRB_CREDENTIAL_AVAILABLE;
++	}
++	return 0;
++}
++
++int acquire_credential(struct auth_s *credentials) {
++	OM_uint32 min_stat, maj_stat;
++	gss_name_t target_name;
++	OM_uint32 lifetime = GSS_C_INDEFINITE;
++	gss_cred_id_t *id;
++
++	char *password = credentials->passnt;
++
++	//!(g_creds->haskrb & KRB_CREDENTIAL_AVAILABLE)
++	if (credentials->user && password) {
++		char name[BUFSIZ];
++		strcpy(name, credentials->user);
++		if (credentials->domain) {
++			strcat(name, "@");
++			strcat(name, credentials->domain);
++		}
++
++		if ((maj_stat = acquire_name(&target_name, name, GSS_C_NT_USER_NAME))
++				!= GSS_S_COMPLETE)
++			return KRB_NO_CREDS;
++
++		//TODO
++		maj_stat = gss_acquire_cred(&min_stat, target_name, lifetime,
++				GSS_C_NO_OID_SET, GSS_C_INITIATE, id, NULL, NULL);
++		if (maj_stat != GSS_S_COMPLETE) {
++			display_status("Acquire credential", maj_stat, min_stat);
++			return KRB_NO_CREDS;
++		}
++
++		(void) gss_release_cred(&min_stat, id);
++
++		(void) gss_release_name(&min_stat, &target_name);
++
++		return KRB_CREDENTIAL_AVAILABLE;
++	}
++	return KRB_NO_CREDS;
++}
