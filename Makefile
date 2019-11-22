@@ -25,6 +25,16 @@ OS=$(shell uname -s)
 OSLDFLAGS=$(shell [ $(OS) = "SunOS" ] && echo "-lrt -lsocket -lnsl")
 LDFLAGS:=-lpthread $(OSLDFLAGS)
 
+ENABLE_KERBEROS=$(shell grep -c ENABLE_KERBEROS config/config.h)
+ifeq ($(ENABLE_KERBEROS),1)
+	OBJS+=kerberos.o
+	LDFLAGS+=-lgssapi_krb5
+endif
+
+#CFLAGS+=-g
+
+all: $(NAME)
+
 
 $(NAME): configure-stamp $(OBJS)
 	@echo "Linking $@"
