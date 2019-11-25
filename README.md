@@ -7,10 +7,32 @@
 
 - patch was applied using below command after the Makefile was modified.
     ```
-    git apply -p0 --ignore-whitespace --directory=cntlm-0.92.3 201211-cntlm-kerberos-authentication.patch 
+    git apply -p0 --ignore-whitespace --directory=cntlm-0.92.3 \
+    201211-cntlm-kerberos-authentication.patch 
     ```
 
 ## Build the container
 ```
 docker build -t cntlm-gss-docker:0.92.3 .
+```
+
+## Run the container
+```
+docker run -it -v ${PWD}/cntlm.conf:/etc/cntlm.conf -p 53128:3128 cntlm-gss-docker:0.92.3  -a ntlmv2
+```
+
+> Note: specify `-a ntlmv2` if you want to use NTLMv2 as a fallback procedure when Kerberos fails
+
+Once the container is running, use `http://localhost:53128` as your proxy on your host.
+
+## Sample contents of `${PWD}/cntlm.conf`
+```
+Username    username
+Domain      DOMAIN.EXAMPLE.ORG
+Password
+Proxy       parent.proxy.example.org:8080
+NoProxy     localhost, 127.0.0.*, 10.*, 192.168.*
+Listen      0.0.0.0:3128
+Auth            NTLMv2
+PassNTLMv2      hashed-ntlm-passwrd
 ```
